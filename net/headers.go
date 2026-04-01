@@ -1,9 +1,54 @@
 package net
 
 import (
+	"context"
 	"net"
 	"net/http"
 )
+
+// contextKeyProxyProtoSSL is used to store whether the PROXY protocol v2 header
+// indicates a TLS connection
+type contextKeyProxyProtoSSL struct{}
+
+// ProxyProtoSSLFromContext retrieves the SSL/TLS information from PROXY protocol v2
+// Returns true if the original connection was TLS, or ok=false if not found
+func ProxyProtoSSLFromContext(ctx context.Context) (ssl bool, ok bool) {
+	val := ctx.Value(contextKeyProxyProtoSSL{})
+	if val == nil {
+		return false, false
+	}
+	ssl, ok = val.(bool)
+	return ssl, ok
+}
+
+// ProxyProtoTLSHandler is an HTTP middleware that extracts SSL/TLS information
+// from PROXY protocol v2 TLVs and stores it in the request context.
+// This allows the forwarded headers handler to properly set X-Forwarded-Proto
+// based on the original client connection protocol, not the connection to skipper.
+type ProxyProtoTLSHandler struct {
+	Lookup  func(remoteAddr, localAddr string) (bool, bool) // lookup function for TLV SSL data
+	Handler http.Handler
+}
+
+func (h *ProxyProtoTLSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Try to look up SSL information from PROXY protocol v2 TLVs
+	if h.Lookup != nil {
+		if ssl, ok := h.Lookup(r.RemoteAddr, getLocalAddr(r)); ok {
+			// Store in request context for forwarded headers handler to use
+			ctx := context.WithValue(r.Context(), contextKeyProxyProtoSSL{}, ssl)
+			r = r.WithContext(ctx)
+		}
+	}
+	h.Handler.ServeHTTP(w, r)
+}
+
+// getLocalAddr extracts the local address from the request
+func getLocalAddr(r *http.Request) string {
+	if addr, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+		return addr.String()
+	}
+	return ""
+}
 
 // ForwardedHeaders sets non-standard X-Forwarded-* Headers
 // See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers#proxies and https://github.com/authelia/authelia
@@ -65,7 +110,15 @@ func (h *ForwardedHeaders) Set(req *http.Request) {
 	}
 
 	if h.Proto == "auto" {
-		if req.TLS != nil {
+		// Check if we have PROXY protocol v2 SSL information
+		if ssl, ok := ProxyProtoSSLFromContext(req.Context()); ok {
+			if ssl {
+				req.Header.Set("X-Forwarded-Proto", "https")
+			} else {
+				req.Header.Set("X-Forwarded-Proto", "http")
+			}
+		} else if req.TLS != nil {
+			// Fall back to checking TLS state
 			req.Header.Set("X-Forwarded-Proto", "https")
 		} else {
 			req.Header.Set("X-Forwarded-Proto", "http")

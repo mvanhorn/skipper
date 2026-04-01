@@ -1468,10 +1468,19 @@ func listenAndServeQuit(
 		}
 	}
 
+	// Wrap proxy handler with ProxyProtoTLSHandler if proxy protocol is enabled
+	handler := proxy
+	if o.EnableProxyProtocol {
+		handler = &skpnet.ProxyProtoTLSHandler{
+			Lookup:  proxylistener.GetProxyProtoSSL,
+			Handler: proxy,
+		}
+	}
+
 	srv := &http.Server{
 		Addr:              address,
 		TLSConfig:         tlsConfig,
-		Handler:           proxy,
+		Handler:           handler,
 		ReadTimeout:       o.ReadTimeoutServer,
 		ReadHeaderTimeout: o.ReadHeaderTimeoutServer,
 		WriteTimeout:      o.WriteTimeoutServer,
